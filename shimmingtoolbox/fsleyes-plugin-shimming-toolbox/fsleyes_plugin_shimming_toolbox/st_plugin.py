@@ -16,14 +16,13 @@ Authors: Alexandre D'Astous, Ainsleigh Hill, Charlotte, Gaspard Cereza, Julien C
 import wx
 
 import fsleyes.controls.controlpanel as ctrlpanel
-import fsleyes.actions.loadoverlay as ovLoad
+import fsleyes.actions.loadoverlay as loadoverlay
 
 
 import numpy as np
 import webbrowser
 import nibabel as nib
 import os
-from pathlib import Path
 import abc
 import tempfile
 import logging
@@ -68,76 +67,10 @@ class STControlPanel(ctrlpanel.ControlPanel):
         self.image_dir_path = []
         self.most_recent_watershed_mask_name = None
 
-        # # Toggle off the X and Y canvas
-        # oopts = ortho.sceneOpts
-        # oopts.showXCanvas = False
-        # oopts.showYCanvas = False
-        #
-        # # Toggle off the cursor
-        # oopts.showCursor = False
-        #
-        # # Toggle off the radiological orientation
-        # self.displayCtx.radioOrientation = False
-        #
-        # # Invert the Y display
-        # self.frame.viewPanels[0].frame.viewPanels[0].getZCanvas().opts.invertY = True
-
         # Create a temporary directory that will hold the NIfTI files
         self.st_temp_dir = tempfile.TemporaryDirectory()
 
         self.verify_version()
-
-    def load_png_image_from_path(self, image_path, is_mask=False, add_to_overlayList=True,
-                                 colormap="greyscale"):
-        """Converts a 2D image into a NIfTI image and loads it as an overlay.
-        The parameter add_to_overlayList allows to display the overlay into FSLeyes.
-
-        Args:
-            image_path (str): The location of the image, including the name and the .extension
-            is_mask (bool): (optional) Whether or not this is a segmentation mask. It will be
-                treated as a normalads_utils
-            add_to_overlayList (bool): (optional) Whether or not to add the image to the overlay
-                list. If so, the image will be displayed in the application. This parameter is
-                True by default.
-            colormap (str): (optional) the colormap of image that will be displayed. This parameter
-                is set to greyscale by default.
-
-        Returns:
-            overlay: the FSLeyes overlay corresponding to the loaded image.
-        """
-
-        # Open the 2D image
-        img_png2D = read_image(image_path)
-
-        if is_mask is True:
-            img_png2D = img_png2D // params.intensity['binary']  # Segmentation masks should be binary
-
-        # Flip the image on the Y axis so that the morphometrics file shows the right coordinates
-        img_png2D = np.flipud(img_png2D)
-
-        # Convert image data into a NIfTI image
-        # Note: PIL and NiBabel use different axis conventions, so some array manipulation has to be done.
-        img_NIfTI = nib.Nifti1Image(
-            np.rot90(img_png2D, k=1, axes=(1, 0)), np.eye(4)
-        )
-
-        # Save the NIfTI image in a temporary directory
-        img_name = os.path.basename(image_path)
-        out_file = self.st_temp_dir.name + "/" + img_name[:-3] + "nii.gz"
-        nib.save(img_NIfTI, out_file)
-
-        # Load the NIfTI image as an overlay
-        img_overlay = ovLoad.loadOverlays(paths=[out_file], inmem=True, blocking=True)[
-            0
-        ]
-
-        # Display the overlay
-        if add_to_overlayList is True:
-            self.overlayList.append(img_overlay)
-            opts = self.displayCtx.getOpts(img_overlay)
-            opts.cmap = colormap
-
-        return img_overlay
 
     def show_message(self, message, caption="Error"):
         """Show a popup message on the FSLeyes interface.
@@ -212,16 +145,19 @@ class TabPanel(wx.Panel):
         super().__init__(parent=parent)
 
         nb = wx.Notebook(self)
-        tab1 = ShimTab(nb)
+        tab1 = DicomToNiftiTab(nb)
         tab2 = FieldMapTab(nb)
         tab3 = MaskTab(nb)
-        tab4 = DicomToNiftiTab(nb)
+        tab4 = ShimTab(nb)
 
         # Add the windows to tabs and name them.
         nb.AddPage(tab1, tab1.title)
         nb.AddPage(tab2, tab2.title)
         nb.AddPage(tab3, tab3.title)
         nb.AddPage(tab4, tab4.title)
+
+        # Set to the Shim tab
+        nb.SetSelection(3)
 
         sizer = wx.BoxSizer()
         sizer.Add(nb, 1, wx.EXPAND)
@@ -290,10 +226,10 @@ class InfoComponent(Component):
         return sizer
 
     def get_logo(self, scale=0.2):
-        """Loads ShimmingToolbox logo saved as a png image and returns it as a wx bitmap image.
+        """Loads ShimmingToolbox logo saved as a png image and returns it as a wx.Bitmap image.
 
         Retunrs:
-            wx.StaticBitmap: The ShimmingToolbox logo
+            wx.StaticBitmap: The ``ShimmingToolbox`` logo
         """
         # fname_st_logo = os.path.join(__dir_shimmingtoolbox__, 'docs', 'source', '_static',
         #                              'shimming_toolbox_logo.png')
@@ -393,7 +329,7 @@ class DropdownComponent(Component):
         """ Create a dropdown list
 
         Args:
-            panel: A panel is a window on which controls are placed.
+            panel (wx.Panel): A panel is a window on which controls are placed.
             dropdown_metadata (list)(dict): A list of dictionaries where the dictionaries have the
                 required keys: ``label``, ``option_name``, ``option_value``.
                 .. code::
@@ -406,7 +342,7 @@ class DropdownComponent(Component):
 
             name (str): Label of the button describing the dropdown
             list_components (list): list of InputComponents
-            info_text (str): Help message when hovering the "i"
+            info_text (str): Info message displayed when hovering over the "i" icon.
         """
         super().__init__(panel, list_components)
         self.dropdown_metadata = dropdown_metadata
@@ -475,12 +411,22 @@ class DropdownComponent(Component):
 
 
 class RunComponent(Component):
-    def __init__(self, panel, st_function, list_components=[]):
+    """Component which contains input and run button.
+
+    Attributes:
+        panel (wx.Panel): TODO.
+        st_function (str): Name of the ``Shimming Toolbox`` CLI function to be called.
+        list_components (list of Component): list of subcomponents to be added.
+        output_paths (list of str): file or folder paths containing output from ``st_function``.
+
+    """
+    def __init__(self, panel, st_function, list_components=[], output_paths=[]):
         super().__init__(panel, list_components)
         self.st_function = st_function
         self.sizer = self.create_sizer()
         self.add_button_run()
-        self.output = ""
+        self.output_paths_original = output_paths
+        self.output_paths = output_paths.copy()
 
     def create_sizer(self):
         """Create the centre sizer containing tab-specific functionality."""
@@ -492,12 +438,20 @@ class RunComponent(Component):
         return sizer
 
     def add_button_run(self):
+        """Add the run button which will call the ``Shimming Toolbox`` CLI."""
         button_run = wx.Button(self.panel, -1, label="Run")
         button_run.Bind(wx.EVT_BUTTON, self.button_run_on_click)
         self.sizer.Add(button_run, 0, wx.CENTRE)
         self.sizer.AddSpacer(10)
 
     def button_run_on_click(self, event):
+        """Function called when the ``Run`` button is clicked.
+
+        1. Calls the relevant ``Shimming Toolbox`` CLI command (``st_function``)
+        2. Logs the output to the terminal in the GUI.
+        3. Sends the output files to the overlay list if applicable.
+
+        """
         try:
             command, msg = self.get_run_args(self.st_function)
             self.panel.terminal_component.log_to_terminal(msg, level="INFO")
@@ -508,21 +462,31 @@ class RunComponent(Component):
         except Exception as err:
             self.panel.terminal_component.log_to_terminal(str(err), level="ERROR")
 
+        self.output_paths.clear()
+        self.output_paths = self.output_paths_original.copy()
+
     def send_output_to_overlay(self):
-        if os.path.isfile(self.output):
-            try:
-                # Load the NIfTI image as an overlay
-                img_overlay = ovLoad.loadOverlays(paths=[self.output], inmem=True, blocking=True)[0]
-                # # Display the overlay
-                window = self.panel.GetGrandParent().GetParent()
-                window.overlayList.append(img_overlay)
-            except Exception as err:
-                self.panel.terminal_component.log_to_terminal(str(err), level="ERROR")
+        for output_path in self.output_paths:
+            if os.path.isfile(output_path):
+                try:
+                    # Display the overlay
+                    window = self.panel.GetGrandParent().GetParent()
+                    if output_path[-4:] == ".png":
+                        load_png_image_from_path(window, output_path, colormap="greyscale")
+                    elif output_path[-7:] == ".nii.gz" or output_path[-4:] == ".nii":
+                        # Load the NIfTI image as an overlay
+                        img_overlay = loadoverlay.loadOverlays(
+                            paths=[output_path],
+                            inmem=True,
+                            blocking=True)[0]
+                        window.overlayList.append(img_overlay)
+                except Exception as err:
+                    self.panel.terminal_component.log_to_terminal(str(err), level="ERROR")
 
     def get_run_args(self, st_function):
         msg = "Running "
         command = st_function
-        # Init arguments and options
+
         command_list_arguments = []
         command_dict_options = {}
         for component in self.list_components:
@@ -543,7 +507,8 @@ class RunComponent(Component):
                             if arg == "" or arg is None:
                                 if input_text_box.required is True:
                                     raise RunArgumentErrorST(
-                                        f"Argument {name} is missing a value, please enter a valid input"
+                                        f"""Argument {name} is missing a value, please enter a
+                                            valid input"""
                                     )
                             else:
                                 # Case where the option name is set to arg, this handles it as if it were an argument
@@ -552,7 +517,7 @@ class RunComponent(Component):
                                 # Normal options
                                 else:
                                     if name == "output":
-                                        self.output = arg
+                                        self.output_paths.append(arg)
                                     if name in command_dict_options.keys():
                                         command_dict_options[name].append(arg)
                                     else:
@@ -672,6 +637,7 @@ class ShimTab(Tab):
         self.sizer_run.AddSpacer(10)
 
     def create_sizer_zshim(self, metadata=None):
+        path_output = os.path.join(__dir_shimmingtoolbox__, "output_rt_zshim")
         input_text_box_metadata = [
             {
                 "button_label": "Input Fieldmap",
@@ -712,19 +678,21 @@ class ShimTab(Tab):
             {
                 "button_label": "Output Folder",
                 "button_function": "select_folder",
-                "default_text": os.path.join(
-                    __dir_shimmingtoolbox__,
-                    "output_rt_zshim"
-                ),
+                "default_text": path_output,
                 "name": "output",
                 "info_text": "Directory to output gradient text file and figures."
             }
         ]
+
         component = InputComponent(self, input_text_box_metadata)
         run_component = RunComponent(
             panel=self,
             list_components=[component],
-            st_function="st_realtime_zshim"
+            st_function="st_realtime_zshim",
+            output_paths=[
+                os.path.join(path_output, "fig_resampled_riro.nii.gz"),
+                os.path.join(path_output, "fig_resampled_static.nii.gz")
+            ]
         )
         sizer = run_component.sizer
         return sizer
@@ -746,16 +714,16 @@ class ShimTab(Tab):
 class FieldMapTab(Tab):
     def __init__(self, parent, title="Field Map"):
         description = "Create a B0 fieldmap.\n\n" \
-                      "Enter the number of echoes then press the `Number of Echoes` button.\n\n" \
+                      "Enter the Number of Echoes then press the `Number of Echoes` button.\n\n" \
                       "Select the unwrapper from the dropdown list."
         super().__init__(parent, title, description)
         self.n_echoes = 0
         input_text_box_metadata_input = [
             {
                 "button_label": "Number of Echoes",
-                "button_function": "add_input_echo_boxes",
+                "button_function": "add_input_phase_boxes",
                 "name": "no_arg",
-                "info_text": "Number of echo NIfTI files to be used. Must be an integer > 0.",
+                "info_text": "Number of phase NIfTI files to be used. Must be an integer > 0.",
                 "required": True
             }
         ]
@@ -979,7 +947,7 @@ class MaskTab(Tab):
                     If no center is provided (None), the middle is used."""
             },
             {
-                "button_label": "Output Folder",
+                "button_label": "Output File",
                 "button_function": "select_folder",
                 "default_text": os.path.join(
                     __dir_shimmingtoolbox__,
@@ -1024,7 +992,7 @@ class MaskTab(Tab):
                     If no center is provided (None), the middle is used."""
             },
             {
-                "button_label": "Output Folder",
+                "button_label": "Output File",
                 "button_function": "select_folder",
                 "default_text": os.path.join(
                     __dir_shimmingtoolbox__,
@@ -1153,9 +1121,9 @@ class TextWithButton:
                 elif self.button_function == "select_from_overlay":
                     self.button_function = lambda event, panel=self.panel, ctrl=textctrl: \
                         select_from_overlay(event, panel, ctrl)
-                elif self.button_function == "add_input_echo_boxes":
+                elif self.button_function == "add_input_phase_boxes":
                     self.button_function = lambda event, panel=self.panel, ctrl=textctrl: \
-                        add_input_echo_boxes(event, panel, ctrl)
+                        add_input_phase_boxes(event, panel, ctrl)
                     textctrl.Bind(wx.EVT_TEXT, self.button_function)
                 button.Bind(wx.EVT_BUTTON, self.button_function)
                 text_with_button_box.Add(button, 0, wx.ALIGN_LEFT | wx.RIGHT, 10)
@@ -1249,7 +1217,7 @@ def select_from_overlay(event, tab, ctrl):
         )
 
 
-def add_input_echo_boxes(event, tab, ctrl):
+def add_input_phase_boxes(event, tab, ctrl):
     """On click of ``Number of Echoes`` button, add ``n_echoes`` ``TextWithButton`` boxes.
 
     For this function, we are assuming the layout of the Component input is as follows:
@@ -1258,14 +1226,14 @@ def add_input_echo_boxes(event, tab, ctrl):
         1 - Spacer
         2 - next item, and so on
 
-    First, we check and see how many echo boxes the tab currently has, and remove any where
+    First, we check and see how many phase boxes the tab currently has, and remove any where
     n current > n update.
-    Next, we add n = n update - n current echo boxes to the tab.
+    Next, we add n = n update - n current phase boxes to the tab.
 
     Args:
         event (wx.Event): when the ``Number of Echoes`` button is clicked.
         tab (FieldMapTab): tab class instance for ``Field Map``.
-        ctrl (wx.TextCtrl): the text box containing the number of echo boxes to add. Must be an
+        ctrl (wx.TextCtrl): the text box containing the number of phase boxes to add. Must be an
             integer > 0.
     """
     option_name = "arg"
@@ -1290,11 +1258,11 @@ def add_input_echo_boxes(event, tab, ctrl):
     for index in range(tab.n_echoes, n_echoes):
         text_with_button = TextWithButton(
             panel=tab,
-            button_label=f"Input Echo {index + 1}",
+            button_label=f"Input Phase {index + 1}",
             button_function="select_from_overlay",
             default_text="",
             n_text_boxes=1,
-            name=f"input_echo_{index + 1}",
+            name=f"input_phase_{index + 1}",
             info_text=f"Input path of phase nifti file {index + 1}",
             required=True
         )
@@ -1323,13 +1291,13 @@ class RunArgumentErrorST(Exception):
 def read_image(filename, bitdepth=8):
     """Read image and convert it to desired bitdepth without truncation."""
     if 'tif' in str(filename):
-        raw_img = imageio.read_image(filename, format='tiff-pil')
+        raw_img = imageio.imread(filename, format='tiff-pil')
         if len(raw_img.shape) > 2:
-            raw_img = imageio.read_image(filename, format='tiff-pil', as_gray=True)
+            raw_img = imageio.imread(filename, format='tiff-pil', as_gray=True)
     else:
-        raw_img = imageio.read_image(filename)
+        raw_img = imageio.imread(filename)
         if len(raw_img.shape) > 2:
-            raw_img = imageio.read_image(filename, as_gray=True)
+            raw_img = imageio.imread(filename, as_gray=True)
 
     img = imageio.core.image_as_uint(raw_img, bitdepth=bitdepth)
     return img
@@ -1337,7 +1305,7 @@ def read_image(filename, bitdepth=8):
 
 def write_image(filename, img, format='png'):
     """Write image."""
-    imageio.write_image(filename, img, format=format)
+    imageio.imwrite(filename, img, format=format)
 
 
 # TODO: find a better way to include this as it is defined in utils as well
@@ -1359,3 +1327,55 @@ def run_subprocess(cmd):
     except subprocess.CalledProcessError as err:
         msg = "Return code: ", err.returncode, "\nOutput: ", err.stderr
         raise Exception(msg)
+
+
+def load_png_image_from_path(fsl_panel, image_path, is_mask=False, add_to_overlayList=True,
+                             colormap="greyscale"):
+    """Convert a 2D image into a NIfTI image and load it as an overlay.
+
+    The parameter ``add_to_overlayList`` enables displaying the overlay in FSLeyes.
+
+    Args:
+        image_path (str): The location of the image, including the name and the .extension
+        is_mask (bool): (optional) Whether or not this is a segmentation mask. It will be
+            treated as a normalads_utils
+        add_to_overlayList (bool): (optional) Whether or not to add the image to the overlay
+            list. If so, the image will be displayed in the application. This parameter is
+            True by default.
+        colormap (str): (optional) the colormap of image that will be displayed. This parameter
+            is set to greyscale by default.
+
+    Returns:
+        overlay: the FSLeyes overlay corresponding to the loaded image.
+    """
+
+    # Open the 2D image
+    img_png2d = read_image(image_path)
+
+    if is_mask is True:
+        img_png2d = img_png2d // np.iinfo(np.uint8).max  # Segmentation masks should be binary
+
+    # Flip the image on the Y axis so that the morphometrics file shows the right coordinates
+    img_png2d = np.flipud(img_png2d)
+
+    # Convert image data into a NIfTI image
+    # Note: PIL and NiBabel use different axis conventions, so some array manipulation has to be done.
+    # TODO: save in the FOV of the current overlay
+    nii_img = nib.Nifti1Image(
+        np.rot90(img_png2d, k=1, axes=(1, 0)), np.eye(4)
+    )
+
+    # Save the NIfTI image in a temporary directory
+    fname_out = image_path[:-3] + "nii.gz"
+    nib.save(nii_img, fname_out)
+
+    # Load the NIfTI image as an overlay
+    img_overlay = loadoverlay.loadOverlays(paths=[fname_out], inmem=True, blocking=True)[0]
+
+    # Display the overlay
+    if add_to_overlayList is True:
+        fsl_panel.overlayList.append(img_overlay)
+        opts = fsl_panel.displayCtx.getOpts(img_overlay)
+        opts.cmap = colormap
+
+    return img_overlay
